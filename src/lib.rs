@@ -1,9 +1,10 @@
 extern crate log;
-extern crate reqwest;
 extern crate backtrace;
 extern crate time;
-extern crate url;
-#[macro_use] extern crate hyper;
+#[macro_use]
+extern crate hyper;
+// for the header! macro.
+extern crate reqwest;
 
 extern crate serde;
 extern crate serde_json;
@@ -130,9 +131,9 @@ pub struct Device {
 impl Device {
     pub fn new(name: String, version: String, build: String) -> Device {
         Device {
-            name: name,
-            version: version,
-            build: build,
+            name,
+            version,
+            build,
         }
     }
 }
@@ -158,7 +159,7 @@ pub struct SentryCredential {
     port: u16,
     project_id: String,
 
-    uri: Url,
+    url: Url,
 }
 
 
@@ -170,7 +171,7 @@ impl std::str::FromStr for SentryCredential {
 
         let scheme = url.scheme();
         if scheme != "http" && scheme != "https" {
-            return Err(CredentialParseError)
+            return Err(CredentialParseError);
         }
 
         let host = url.host_str().unwrap();
@@ -184,7 +185,7 @@ impl std::str::FromStr for SentryCredential {
         let project_id = url.path_segments().and_then(|paths| paths.last()).unwrap();
 
         if key.is_empty() || project_id.is_empty() {
-            return Err(CredentialParseError)
+            return Err(CredentialParseError);
         }
 
         let uri_str = format!(
@@ -206,7 +207,7 @@ impl std::str::FromStr for SentryCredential {
             port,
             project_id: project_id.to_owned(),
 
-            uri,
+            url: uri,
         })
     }
 }
@@ -227,10 +228,10 @@ impl Settings {
         device: Device,
     ) -> Settings {
         Settings {
-            server_name: server_name,
-            release: release,
-            environment: environment,
-            device: device,
+            server_name,
+            release,
+            environment,
+            device,
         }
     }
 }
@@ -239,23 +240,21 @@ header! { (XSentryAuth, "X-Sentry-Auth") => [String] }
 
 #[derive(Clone)]
 pub struct Sentry {
-    //    remote: Remote,
     credential: Arc<SentryCredential>,
     settings: Arc<Settings>,
 }
 
 impl Sentry {
     pub fn new(
-//        handle: Handle,
-server_name: String,
-release: String,
-environment: String,
-credential: SentryCredential,
+        server_name: String,
+        release: String,
+        environment: String,
+        credential: SentryCredential,
     ) -> Sentry {
         let settings = Settings {
-            server_name: server_name,
-            release: release,
-            environment: environment,
+            server_name,
+            release,
+            environment,
             ..Settings::default()
         };
 
@@ -263,12 +262,10 @@ credential: SentryCredential,
     }
 
     pub fn from_settings(
-//        handle: Handle,
-settings: Settings,
-credential: SentryCredential,
+        settings: Settings,
+        credential: SentryCredential,
     ) -> Sentry {
         Sentry {
-//            remote: handle.remote().clone(),
             credential: Arc::new(credential),
             settings: Arc::new(settings),
         }
@@ -276,7 +273,7 @@ credential: SentryCredential,
 
     pub fn log_event(&self, e: Event) {
         let cred = self.credential.clone();
-        let _  = post(&cred, e);
+        let _ = post(&cred, e);
     }
 
     pub fn register_panic_handler<F>(&self, maybe_f: Option<F>)
@@ -285,7 +282,6 @@ credential: SentryCredential,
     {
         let cred = self.credential.clone();
         let settings = self.settings.clone();
-//        let remote = self.remote.clone();
         std::panic::set_hook(Box::new(move |info: &std::panic::PanicInfo| {
             let location = info.location()
                 .map(|l| format!("{}: {}", l.file(), l.line()))
@@ -312,9 +308,9 @@ credential: SentryCredential,
                     });
                     let lineno = symbol.lineno().unwrap_or(0);
                     frames.push(StackFrame {
-                        filename: filename,
+                        filename,
                         function: name,
-                        lineno: lineno,
+                        lineno,
                     });
                 });
 
@@ -404,9 +400,8 @@ credential: SentryCredential,
 }
 
 fn post(cred: &SentryCredential, e: Event) -> Result<(), Error> {
-//    let mut req = reqwest::Request::new(hyper::Method::Post, cred.uri().clone());
     let body = serde_json::to_string(&e).map_err(Error::from)?;
-    let mut  headers = reqwest::header::Headers::new();
+    let mut headers = reqwest::header::Headers::new();
 
     // X-Sentry-Auth: Sentry sentry_version=7,
     // sentry_client=<client version, arbitrary>,
@@ -427,7 +422,7 @@ fn post(cred: &SentryCredential, e: Event) -> Result<(), Error> {
     headers.set(ContentLength(body.len() as u64));
 
     let client = reqwest::Client::new();
-    let _ = client.post(cred.uri.as_ref()).headers(headers).body(body).send().unwrap();
+    let _ = client.post(cred.url.as_ref()).headers(headers).body(body).send().unwrap();
 
     Ok(())
 }
