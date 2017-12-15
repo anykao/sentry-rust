@@ -1,47 +1,29 @@
 extern crate log;
-
-#[macro_use]
-extern crate error_chain;
-
+extern crate reqwest;
 extern crate backtrace;
 extern crate time;
 extern crate url;
-extern crate futures;
-extern crate tokio_core;
-#[macro_use]
-extern crate hyper;
-extern crate hyper_tls;
+#[macro_use] extern crate hyper;
 
 extern crate serde;
 extern crate serde_json;
 #[macro_use]
 extern crate serde_derive;
+#[macro_use]
+extern crate failure;
 
 use std::sync::Arc;
 use std::default::Default;
 use std::collections::HashMap;
+use failure::Error;
 
-use futures::*;
-use tokio_core::reactor::{Handle, Remote};
-use hyper::header::{ContentType, ContentLength};
+use reqwest::header::{ContentType, ContentLength};
+use reqwest::Url;
 
-mod errors {
-    error_chain! {
-        foreign_links {
-            HyperError(::hyper::Error);
-            HyperUri(::hyper::error::UriError);
-            Json(::serde_json::Error);
-            UrlParse(::url::ParseError);
-        }
+#[derive(Debug, Fail)]
+#[fail(display = "Invalid Sentry DSN syntax.")]
+pub struct CredentialParseError;
 
-        errors {
-            CredentialParseError {
-                description("Invalid Sentry DSN syntax. Expected the form `(http|https)://{public key}:{private key}@{host}:{port}/{project id}`")
-            }
-        }
-    }
-}
-pub use errors::*;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StackFrame {
@@ -54,23 +36,37 @@ pub struct StackFrame {
 #[derive(Debug, Clone, Serialize)]
 pub struct Event {
     // required
-    event_id: String, // uuid4 exactly 32 characters (no dashes!)
-    message: String, // Maximum length is 1000 characters.
-    timestamp: String, // ISO 8601 format, without a timezone ex: "2011-05-02T17:41:36"
-    level: String, // fatal, error, warning, info, debug
-    logger: String, // ex "my.logger.name"
-    platform: String, // Acceptable values ..., other
+    event_id: String,
+    // uuid4 exactly 32 characters (no dashes!)
+    message: String,
+    // Maximum length is 1000 characters.
+    timestamp: String,
+    // ISO 8601 format, without a timezone ex: "2011-05-02T17:41:36"
+    level: String,
+    // fatal, error, warning, info, debug
+    logger: String,
+    // ex "my.logger.name"
+    platform: String,
+    // Acceptable values ..., other
     sdk: SDK,
     device: Device,
     // optional
-    culprit: Option<String>, // the primary perpetrator of this event ex: "my.module.function_name"
-    server_name: Option<String>, // host client from which the event was recorded
-    stack_trace: Option<Vec<StackFrame>>, // stack trace
-    release: Option<String>, // generally be something along the lines of the git SHA for the given project
-    tags: HashMap<String, String>, // WARNING! should be serialized as json object k->v
-    environment: Option<String>, // ex: "production"
-    modules: HashMap<String, String>, // WARNING! should be serialized as json object k->v
-    extra: HashMap<String, String>, // WARNING! should be serialized as json object k->v
+    culprit: Option<String>,
+    // the primary perpetrator of this event ex: "my.module.function_name"
+    server_name: Option<String>,
+    // host client from which the event was recorded
+    stack_trace: Option<Vec<StackFrame>>,
+    // stack trace
+    release: Option<String>,
+    // generally be something along the lines of the git SHA for the given project
+    tags: HashMap<String, String>,
+    // WARNING! should be serialized as json object k->v
+    environment: Option<String>,
+    // ex: "production"
+    modules: HashMap<String, String>,
+    // WARNING! should be serialized as json object k->v
+    extra: HashMap<String, String>,
+    // WARNING! should be serialized as json object k->v
     fingerprint: Vec<String>, // An array of strings used to dictate the deduplicating for this event.
 }
 
@@ -103,7 +99,7 @@ impl Event {
             device: device.to_owned(),
             culprit: culprit.map(|c| c.to_owned()),
             server_name: server_name.map(|c| c.to_owned()),
-            stack_trace: stack_trace,
+            stack_trace,
             release: release.map(|c| c.to_owned()),
             tags: tags.unwrap_or(Default::default()),
             environment: environment.map(|c| c.to_owned()),
@@ -123,6 +119,7 @@ pub struct SDK {
     name: String,
     version: String,
 }
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Device {
     name: String,
@@ -161,40 +158,33 @@ pub struct SentryCredential {
     port: u16,
     project_id: String,
 
-    uri: hyper::Uri,
+    uri: Url,
 }
 
-impl SentryCredential {
-    /// {SCHEME}://{PUBLIC_KEY}:{SECRET_KEY}@{HOST}/{PATH}{PROJECT_ID}/store/
-    fn uri<'a>(&'a self) -> &'a hyper::Uri {
-        &self.uri
-    }
-}
 
+// FIXME take care of unwrap()...
 impl std::str::FromStr for SentryCredential {
-    type Err = Error;
-    fn from_str(s: &str) -> std::result::Result<SentryCredential, Error> {
-        let url = url::Url::parse(s).map_err(Error::from)?;
+    type Err = CredentialParseError;
+    fn from_str(s: &str) -> std::result::Result<SentryCredential, CredentialParseError> {
+        let url = Url::parse(s).unwrap();
 
         let scheme = url.scheme();
         if scheme != "http" && scheme != "https" {
-            bail!(ErrorKind::CredentialParseError);
+            return Err(CredentialParseError)
         }
 
-        let host = url.host_str().ok_or(ErrorKind::CredentialParseError)?;
+        let host = url.host_str().unwrap();
         let port = url.port().unwrap_or_else(
             || if scheme == "http" { 80 } else { 443 },
         );
 
         let key = url.username();
-        let secret = url.password().ok_or(ErrorKind::CredentialParseError)?;
+        let secret = url.password().unwrap();
 
-        let project_id = url.path_segments().and_then(|paths| paths.last()).ok_or(
-            ErrorKind::CredentialParseError,
-        )?;
+        let project_id = url.path_segments().and_then(|paths| paths.last()).unwrap();
 
         if key.is_empty() || project_id.is_empty() {
-            bail!(ErrorKind::CredentialParseError);
+            return Err(CredentialParseError)
         }
 
         let uri_str = format!(
@@ -206,7 +196,7 @@ impl std::str::FromStr for SentryCredential {
             port,
             project_id
         );
-        let uri = uri_str.parse().map_err(Error::from)?;
+        let uri = uri_str.parse().unwrap();
 
         Ok(SentryCredential {
             scheme: scheme.to_owned(),
@@ -249,18 +239,18 @@ header! { (XSentryAuth, "X-Sentry-Auth") => [String] }
 
 #[derive(Clone)]
 pub struct Sentry {
-    remote: Remote,
+    //    remote: Remote,
     credential: Arc<SentryCredential>,
     settings: Arc<Settings>,
 }
 
 impl Sentry {
     pub fn new(
-        handle: Handle,
-        server_name: String,
-        release: String,
-        environment: String,
-        credential: SentryCredential,
+//        handle: Handle,
+server_name: String,
+release: String,
+environment: String,
+credential: SentryCredential,
     ) -> Sentry {
         let settings = Settings {
             server_name: server_name,
@@ -269,16 +259,16 @@ impl Sentry {
             ..Settings::default()
         };
 
-        Sentry::from_settings(handle, settings, credential)
+        Sentry::from_settings(settings, credential)
     }
 
     pub fn from_settings(
-        handle: Handle,
-        settings: Settings,
-        credential: SentryCredential,
+//        handle: Handle,
+settings: Settings,
+credential: SentryCredential,
     ) -> Sentry {
         Sentry {
-            remote: handle.remote().clone(),
+//            remote: handle.remote().clone(),
             credential: Arc::new(credential),
             settings: Arc::new(settings),
         }
@@ -286,18 +276,16 @@ impl Sentry {
 
     pub fn log_event(&self, e: Event) {
         let cred = self.credential.clone();
-        self.remote.spawn(move |handle| {
-            post(handle, &cred, e).map_err(|_e| ())
-        });
+        let _  = post(&cred, e);
     }
 
     pub fn register_panic_handler<F>(&self, maybe_f: Option<F>)
-    where
-        F: Fn(&std::panic::PanicInfo) + 'static + Sync + Send,
+        where
+            F: Fn(&std::panic::PanicInfo) + 'static + Sync + Send,
     {
         let cred = self.credential.clone();
         let settings = self.settings.clone();
-        let remote = self.remote.clone();
+//        let remote = self.remote.clone();
         std::panic::set_hook(Box::new(move |info: &std::panic::PanicInfo| {
             let location = info.location()
                 .map(|l| format!("{}: {}", l.file(), l.line()))
@@ -351,7 +339,7 @@ impl Sentry {
                 f(info);
             }
             let cred = cred.clone();
-            remote.spawn(move |handle| post(handle, &cred, e).map_err(|_e| {}));
+            let _ = post(&cred, e);
         }));
     }
 
@@ -415,236 +403,32 @@ impl Sentry {
     }
 }
 
-// POST /api/1/store/ HTTP/1.1
-// Content-Type: application/json
-//
-fn post(handle: &Handle, cred: &SentryCredential, e: Event) -> Result<()> {
-    if cred.scheme == "https" {
-        // https
-        let client = hyper::Client::configure()
-            .connector(hyper_tls::HttpsConnector::new(4, handle).unwrap())
-            .build(handle);
-        post_client(client, handle.clone(), cred, e)
-    } else {
-        // http
-        post_client(hyper::Client::new(handle), handle.clone(), cred, e)
-    }
-}
-
-fn post_client<C>(
-    client: hyper::client::Client<C>,
-    handle: Handle,
-    cred: &SentryCredential,
-    e: Event,
-) -> Result<()>
-where
-    C: hyper::client::Connect,
-{
-    let mut req = hyper::Request::new(hyper::Method::Post, cred.uri().clone());
+fn post(cred: &SentryCredential, e: Event) -> Result<(), Error> {
+//    let mut req = reqwest::Request::new(hyper::Method::Post, cred.uri().clone());
     let body = serde_json::to_string(&e).map_err(Error::from)?;
-    {
-        let headers = req.headers_mut();
+    let mut  headers = reqwest::header::Headers::new();
 
-        // X-Sentry-Auth: Sentry sentry_version=7,
-        // sentry_client=<client version, arbitrary>,
-        // sentry_timestamp=<current timestamp>,
-        // sentry_key=<public api key>,
-        // sentry_secret=<secret api key>
-        //
-        let timestamp = time::get_time().sec.to_string();
-        let xsentryauth = format!(
-            "Sentry sentry_version=7,sentry_client=rust-sentry/{},sentry_timestamp={},sentry_key={},sentry_secret={}",
-            env!("CARGO_PKG_VERSION"),
-            timestamp,
-            cred.key,
-            cred.secret
-        );
-        headers.set(XSentryAuth(xsentryauth));
-        headers.set(ContentType::json());
-        headers.set(ContentLength(body.len() as u64));
-    }
-    req.set_body(hyper::Body::from(body));
+    // X-Sentry-Auth: Sentry sentry_version=7,
+    // sentry_client=<client version, arbitrary>,
+    // sentry_timestamp=<current timestamp>,
+    // sentry_key=<public api key>,
+    // sentry_secret=<secret api key>
+    //
+    let timestamp = time::get_time().sec.to_string();
+    let xsentryauth = format!(
+        "Sentry sentry_version=7,sentry_client=rust-sentry/{},sentry_timestamp={},sentry_key={},sentry_secret={}",
+        env!("CARGO_PKG_VERSION"),
+        timestamp,
+        cred.key,
+        cred.secret
+    );
+    headers.set(XSentryAuth(xsentryauth));
+    headers.set(ContentType::json());
+    headers.set(ContentLength(body.len() as u64));
 
-    let f = client
-        .request(req)
-        .map_err(|_| ())
-        .and_then(|resp| {
-            resp.body()
-                .concat2()
-                .map(|_resp_bytes| {
-                    // println!("{:?}", _resp_bytes);
-                    ()
-                })
-                .map_err(|_e| {
-                    // println!("{:?}", _e);
-                    ()
-                })
-        })
-        .map_err(|_e| ());
-    handle.spawn(f);
+    let client = reqwest::Client::new();
+    let _ = client.post(cred.uri.as_ref()).headers(headers).body(body).send().unwrap();
+
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::panic::*;
-    use std::thread;
-    use std::sync::Mutex;
-    use tokio_core::reactor::Core;
-
-    #[test]
-    fn it_registrer_panic_handler() {
-        let core = Core::new().unwrap();
-        let handle = core.handle();
-
-        let dsn = "https://xx:xx@app.getsentry.com/xx";
-        let cred = dsn.parse().unwrap();
-
-        let sentry = Sentry::new(
-            handle,
-            "Server Name".to_string(),
-            "release".to_string(),
-            "test_env".to_string(),
-            cred,
-        );
-
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let s = Mutex::new(sender);
-
-        sentry.register_panic_handler(Some(move |_: &PanicInfo| -> () {
-            let lock = match s.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            let _ = lock.send(true);
-        }));
-
-        let t1 = thread::spawn(|| {
-            panic!("Panic Handler Testing");
-        });
-        let _ = t1.join();
-
-        assert_eq!(receiver.recv().unwrap(), true);
-        sentry.unregister_panic_handler();
-
-    }
-
-    #[test]
-    fn it_share_sentry_accross_threads() {
-        let core = Core::new().unwrap();
-        let handle = core.handle();
-
-        let dsn = "https://xx:xx@app.getsentry.com/xx";
-        let cred = dsn.parse().unwrap();
-
-        let sentry = Arc::new(Sentry::new(
-            handle,
-            "Server Name".to_string(),
-            "release".to_string(),
-            "test_env".to_string(),
-            cred,
-        ));
-
-        let sentry1 = sentry.clone();
-        let t1 = thread::spawn(move || sentry1.settings.server_name.clone());
-        let sentry2 = sentry.clone();
-        let t2 = thread::spawn(move || sentry2.settings.server_name.clone());
-
-        let r1 = t1.join().unwrap();
-        let r2 = t2.join().unwrap();
-
-        assert!(r1 == sentry.settings.server_name);
-        assert!(r2 == sentry.settings.server_name);
-    }
-
-    #[test]
-    fn test_parsing_dsn_when_valid() {
-        let cred: SentryCredential = "https://mypublickey:myprivatekey@myhost/myprojectid"
-            .parse()
-            .unwrap();
-        assert_eq!("mypublickey", cred.key);
-        assert_eq!("myprivatekey", cred.secret);
-        assert_eq!("myhost", cred.host);
-        assert_eq!("myprojectid", cred.project_id);
-    }
-
-    #[test]
-    fn test_parsing_dsn_with_nested_project_id() {
-        let cred: SentryCredential = "https://mypublickey:myprivatekey@myhost/foo/bar/myprojectid"
-            .parse()
-            .unwrap();
-        assert_eq!("mypublickey", cred.key);
-        assert_eq!("myprivatekey", cred.secret);
-        assert_eq!("myhost", cred.host);
-        assert_eq!("myprojectid", cred.project_id);
-    }
-
-    #[test]
-    fn test_parsing_dsn_when_lacking_project_id() {
-        let parsed_creds = "https://mypublickey:myprivatekey@myhost/".parse::<SentryCredential>();
-        assert!(parsed_creds.is_err());
-    }
-
-    #[test]
-    fn test_parsing_dsn_when_lacking_private_key() {
-        let parsed_creds = "https://mypublickey@myhost/myprojectid".parse::<SentryCredential>();
-        assert!(parsed_creds.is_err());
-    }
-
-    #[test]
-    fn test_parsing_dsn_when_lacking_protocol() {
-        let parsed_creds = "mypublickey:myprivatekey@myhost/myprojectid"
-            .parse::<SentryCredential>();
-        assert!(parsed_creds.is_err());
-    }
-
-    #[test]
-    fn test_empty_settings_constructor_matches_empty_new_constructor() {
-        let core = Core::new().unwrap();
-        let handle = core.handle();
-
-        let creds = "https://mypublickey:myprivatekey@myhost/myprojectid"
-            .parse::<SentryCredential>()
-            .unwrap();
-        let from_settings =
-            Sentry::from_settings(handle.clone(), Default::default(), creds.clone());
-        let from_new = Sentry::new(
-            handle,
-            "".to_string(),
-            "".to_string(),
-            "".to_string(),
-            creds,
-        );
-        assert_eq!(from_settings.settings, from_new.settings);
-    }
-
-    #[test]
-    fn test_full_settings_constructor_overrides_all_settings() {
-        let core = Core::new().unwrap();
-        let handle = core.handle();
-
-        let creds = "https://mypublickey:myprivatekey@myhost/myprojectid"
-            .parse::<SentryCredential>()
-            .unwrap();
-        let server_name = "server_name".to_string();
-        let release = "release".to_string();
-        let environment = "environment".to_string();
-        let device = Device::new(
-            "device_name".to_string(),
-            "version".to_string(),
-            "build".to_string(),
-        );
-        let settings = Settings {
-            server_name: server_name.clone(),
-            release: release.clone(),
-            environment: environment.clone(),
-            device: device.clone(),
-        };
-        let from_settings = Sentry::from_settings(handle, settings, creds);
-        assert_eq!(from_settings.settings.server_name, server_name);
-        assert_eq!(from_settings.settings.release, release);
-        assert_eq!(from_settings.settings.environment, environment);
-        assert_eq!(from_settings.settings.device, device);
-    }
-}
