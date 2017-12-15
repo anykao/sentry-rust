@@ -163,26 +163,38 @@ pub struct SentryCredential {
 }
 
 
-// FIXME take care of unwrap()...
 impl std::str::FromStr for SentryCredential {
     type Err = CredentialParseError;
     fn from_str(s: &str) -> std::result::Result<SentryCredential, CredentialParseError> {
-        let url = Url::parse(s).unwrap();
+        let url = match Url::parse(s) {
+            Ok(url) => url,
+            Err(_) => return Err(CredentialParseError),
+        };
 
         let scheme = url.scheme();
         if scheme != "http" && scheme != "https" {
             return Err(CredentialParseError);
         }
 
-        let host = url.host_str().unwrap();
+        let host = match url.host_str() {
+            Some(host) => host,
+            None => return Err(CredentialParseError),
+        };
+
         let port = url.port().unwrap_or_else(
             || if scheme == "http" { 80 } else { 443 },
         );
 
         let key = url.username();
-        let secret = url.password().unwrap();
+        let secret = match url.password() {
+            Some(s) => s,
+            None => return Err(CredentialParseError),
+        };
 
-        let project_id = url.path_segments().and_then(|paths| paths.last()).unwrap();
+        let project_id = match url.path_segments().and_then(|paths| paths.last()) {
+            Some(id) => id,
+            None => return Err(CredentialParseError),
+        };
 
         if key.is_empty() || project_id.is_empty() {
             return Err(CredentialParseError);
@@ -197,7 +209,10 @@ impl std::str::FromStr for SentryCredential {
             port,
             project_id
         );
-        let uri = uri_str.parse().unwrap();
+        let uri = match uri_str.parse() {
+            Ok(u) => u,
+            Err(_) => return Err(CredentialParseError),
+        };
 
         Ok(SentryCredential {
             scheme: scheme.to_owned(),
@@ -400,7 +415,7 @@ impl Sentry {
 }
 
 fn post(cred: &SentryCredential, e: Event) -> Result<(), Error> {
-    let body = serde_json::to_string(&e).map_err(Error::from)?;
+    let body = serde_json::to_string(&e)?;
     let mut headers = reqwest::header::Headers::new();
 
     // X-Sentry-Auth: Sentry sentry_version=7,
@@ -422,7 +437,7 @@ fn post(cred: &SentryCredential, e: Event) -> Result<(), Error> {
     headers.set(ContentLength(body.len() as u64));
 
     let client = reqwest::Client::new();
-    let _ = client.post(cred.url.as_ref()).headers(headers).body(body).send().unwrap();
+    let _ = client.post(cred.url.as_ref()).headers(headers).body(body).send()?;
 
     Ok(())
 }
